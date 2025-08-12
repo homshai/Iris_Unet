@@ -1,5 +1,6 @@
 # utils.py - metrics, losses, checkpoint helpers
 import torch, os, cv2, numpy as np, time
+import torch.nn.functional as F
 
 def iou_score(preds, targets, eps=1e-7):
     preds = preds.float(); targets = targets.float()
@@ -21,6 +22,33 @@ def dice_loss(preds, targets, eps=1e-7):
     denom = preds.sum(dim=[1,2,3]) + targets.sum(dim=[1,2,3])
     loss = 1.0 - ((2 * inter + eps) / (denom + eps))
     return loss.mean()
+
+def boundary_target(mask, connectivity=1):
+    """
+    Compute a binary boundary/edge target from a binary mask using Sobel-like filters.
+    Args:
+        mask: torch.Tensor with shape (B,1,H,W) or (B,H,W), values in {0,1} or {0.,1.}
+    Returns:
+        edge: torch.Tensor same shape (B,1,H,W) with values 0/1 (float)
+    Implementation using simple gradient magnitude with conv kernels (works on GPU).
+    """
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(1)
+    mask = mask.float()
+    # define sobel kernels
+    kernel_x = torch.tensor([[-1.,0.,1.],[-2.,0.,2.],[-1.,0.,1.]], dtype=torch.float32, device=mask.device).view(1,1,3,3)
+    kernel_y = torch.tensor([[-1.,-2.,-1.],[0.,0.,0.],[1.,2.,1.]], dtype=torch.float32, device=mask.device).view(1,1,3,3)
+    # pad reflect
+    grad_x = F.conv2d(mask, kernel_x, padding=1)
+    grad_y = F.conv2d(mask, kernel_y, padding=1)
+    grad = torch.sqrt(grad_x * grad_x + grad_y * grad_y + 1e-6)
+    # normalize per-sample
+    maxv = grad.view(grad.size(0), -1).max(dim=1)[0].view(-1,1,1,1)
+    maxv = torch.clamp(maxv, min=1e-6)
+    grad = grad / maxv
+    # threshold to binary edge
+    edge = (grad > 0.05).float()
+    return edge
 
 def save_checkpoint(model, optimizer, epoch, best_iou, path):
     ck = {'model': model.state_dict(), 'optimizer': getattr(optimizer,'state_dict', lambda: None)(), 'epoch': epoch, 'best_iou': best_iou}

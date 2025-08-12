@@ -15,7 +15,7 @@ def run_test(args):
     model = build_model(num_classes=1, pretrained=False, base_channels=32)
     ck = torch.load(args.weights, map_location=device)
     state = ck.get('model', ck)
-    model.load_state_dict(state)
+    model.load_state_dict(state, strict=False)
     model.to(device)
     model.eval()
     
@@ -84,22 +84,32 @@ def run_test(args):
                 gt_overlay[resized_gt_mask > 0] = [0, 255, 0]  # Green for ground truth
                 gt_combined = cv2.addWeighted(original_img, 0.6, gt_overlay, 0.4, 0)
                 
+                # Add "GT mask" text to ground truth image
+                cv2.putText(gt_combined, 'GT mask', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+                
                 # Create overlay for prediction
                 pred_overlay = original_img.copy()
                 pred_overlay[resized_pred_mask > 0] = [255, 0, 0]  # Red for prediction
                 pred_combined = cv2.addWeighted(original_img, 0.6, pred_overlay, 0.4, 0)
                 
+                # Add "Predicted mask" text to prediction image
+                cv2.putText(pred_combined, 'Predicted mask', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 2, cv2.LINE_AA)
+                
                 # Combine both overlays side by side
-                combined_height = max(gt_combined.shape[0], pred_combined.shape[0])
+                combined_height = max(gt_combined.shape[0], pred_combined.shape[0]) + 40  # Extra space for text
                 combined_width = gt_combined.shape[1] + pred_combined.shape[1]
                 combined_img = np.zeros((combined_height, combined_width, 3), dtype=np.uint8)
-                combined_img[:gt_combined.shape[0], :gt_combined.shape[1]] = gt_combined
-                combined_img[:pred_combined.shape[0], gt_combined.shape[1]:gt_combined.shape[1]+pred_combined.shape[1]] = pred_combined
+                combined_img[20:20+gt_combined.shape[0], :gt_combined.shape[1]] = gt_combined
+                combined_img[20:20+pred_combined.shape[0], gt_combined.shape[1]:gt_combined.shape[1]+pred_combined.shape[1]] = pred_combined
                 
-                # Add metrics text
-                avg_iou = total_iou / num_samples
-                avg_dice = total_dice / num_samples
-                text = f'Avg IoU: {avg_iou:.4f} | Avg Dice: {avg_dice:.4f}'
+                # Calculate current sample metrics
+                sample_iou = iou_score(pred_masks[i].unsqueeze(0), gt_masks[i].unsqueeze(0)).item()
+                sample_dice = dice_score(pred_masks[i].unsqueeze(0), gt_masks[i].unsqueeze(0)).item()
+                
+                # Add current sample metrics text
+                text = f'Current IoU: {sample_iou:.4f} | Current Dice: {sample_dice:.4f}'
                 cv2.putText(combined_img, text, (10, combined_img.shape[0] - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
                 

@@ -11,7 +11,7 @@ def run_inference(args):
     model = build_model(num_classes=1, pretrained=False, base_channels=32)
     ck = torch.load(args.weights, map_location=device)
     state = ck.get('model', ck)
-    model.load_state_dict(state)
+    model.load_state_dict(state, strict=False)
     model.to(device); model.eval()
     print('Model params:', count_parameters(model))
     
@@ -56,11 +56,44 @@ def run_inference(args):
                 prob = probs[b,0]
                 mask = (prob > 0.5).astype('uint8')*255
                 
-                # 使用原图文件名作为基础，添加_mask后缀
+                # 获取原始图像
                 original_img_path = inputs[idx]
-                base_name = os.path.splitext(os.path.basename(original_img_path))[0]
-                fname = f'{base_name}_mask.png'
-                save_mask(mask, os.path.join(args.output, fname))
+                original_img = cv2.imread(original_img_path)
+                if original_img is None:
+                    original_img = cv2.imdecode(np.fromfile(original_img_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+                
+                # 如果是单通道图像，转换为三通道
+                if len(original_img.shape) == 2 or original_img.shape[2] == 1:
+                    original_img = cv2.cvtColor(original_img, cv2.COLOR_GRAY2BGR)
+                
+                # 调整mask尺寸以匹配原始图像
+                resized_mask = cv2.resize(mask, (original_img.shape[1], original_img.shape[0]), interpolation=cv2.INTER_NEAREST)
+                
+                # 根据overlay参数决定是否生成overlay图像以及如何命名输出文件
+                if hasattr(args, 'overlay') and args.overlay:
+                    # 生成overlay图像，文件名添加_mask后缀
+                    base_name = os.path.splitext(os.path.basename(original_img_path))[0]
+                    fname = f'{base_name}_mask.png'
+                    save_mask(resized_mask, os.path.join(args.output, fname))
+                    
+                    # 生成叠加图像
+                    overlay = original_img.copy()
+                    # 将mask区域标记为绿色
+                    overlay[resized_mask > 0] = [0, 255, 0]
+                    
+                    # 混合原图和mask
+                    alpha = 0.6
+                    combined = cv2.addWeighted(original_img, alpha, overlay, 1-alpha, 0)
+                    
+                    # 保存叠加图像，使用原图文件名作为基础，添加_overlay后缀
+                    overlay_fname = f'{base_name}_overlay.png'
+                    cv2.imwrite(os.path.join(args.output, overlay_fname), combined)
+                else:
+                    # 只输出mask，文件名和原图文件名一样
+                    base_name = os.path.splitext(os.path.basename(original_img_path))[0]
+                    ext = os.path.splitext(original_img_path)[1]
+                    fname = f'{base_name}{ext}'
+                    save_mask(resized_mask, os.path.join(args.output, fname))
                 
                 # 如果启用了可视化参数，将预测的mask叠加到原图进行对比
                 if hasattr(args, 'visualize') and args.visualize:
