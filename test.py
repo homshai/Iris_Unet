@@ -7,17 +7,35 @@ from dataset import IrisDataset, collect_pairs
 from torch.utils.data import DataLoader
 from utils import iou_score, dice_score
 
+# Try to import onnxruntime, but handle the case where it's not available
+try:
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ort = None
+    ONNX_AVAILABLE = False
+
 
 def run_test(args):
     device = torch.device(args.device if torch.cuda.is_available() and 'cuda' in args.device else 'cpu')
     
-    # Build model
-    model = build_model(num_classes=1, pretrained=False, base_channels=32)
-    ck = torch.load(args.weights, map_location=device)
-    state = ck.get('model', ck)
-    model.load_state_dict(state, strict=False)
-    model.to(device)
-    model.eval()
+    # Check if using ONNX model
+    use_onnx = args.weights.endswith('.onnx')
+    
+    if use_onnx:
+        if not ONNX_AVAILABLE:
+            raise ImportError("ONNX model specified but onnxruntime is not installed. Please install onnxruntime to use ONNX models.")
+        # Use ONNX Runtime
+        session = ort.InferenceSession(args.weights)
+        input_name = session.get_inputs()[0].name
+    else:
+        # Build PyTorch model
+        model = build_model(num_classes=1, pretrained=False, base_channels=32)
+        ck = torch.load(args.weights, map_location=device)
+        state = ck.get('model', ck)
+        model.load_state_dict(state, strict=False)
+        model.to(device)
+        model.eval()
     
     # Collect image-mask pairs from data folder
     images, masks = collect_pairs(args.data)
@@ -42,9 +60,18 @@ def run_test(args):
             gt_masks = gt_masks.to(device)
             
             # Run inference
-            preds = model(imgs)
-            probs = torch.sigmoid(preds)
-            pred_masks = (probs > 0.5).float()
+            if use_onnx:
+                # ONNX inference
+                imgs_np = imgs.cpu().numpy()
+                preds = session.run(None, {input_name: imgs_np})[0]
+                preds = torch.from_numpy(preds).to(device)
+                probs = torch.sigmoid(preds)
+                pred_masks = (probs > 0.5).float()
+            else:
+                # PyTorch inference
+                preds = model(imgs)
+                probs = torch.sigmoid(preds)
+                pred_masks = (probs > 0.5).float()
             
             # Calculate metrics
             batch_iou = iou_score(pred_masks, gt_masks)

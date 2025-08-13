@@ -28,7 +28,7 @@ def parse_args():
     t.add_argument('--boundary-weight', type=float, default=0.0, help='Auxiliary boundary loss weight (0 = disabled)')
 
     i = sub.add_parser('infer')
-    i.add_argument('--weights', type=str, required=True)
+    i.add_argument('--weights', type=str, required=True, help='Path to model weights (.pth or .onnx)')
     i.add_argument('--input', type=str, required=True)
     i.add_argument('--output', type=str, default='results')
     i.add_argument('--batch-size', type=int, default=8)
@@ -39,7 +39,7 @@ def parse_args():
     i.add_argument('--overlay', action='store_true', help='Whether to generate overlay image. Default is False, only output mask with same name as original image. If True, generate overlay image with _mask and _overlay suffixes.')
 
     test_parser = sub.add_parser('test')
-    test_parser.add_argument('--weights', type=str, required=True)
+    test_parser.add_argument('--weights', type=str, required=True, help='Path to model weights (.pth or .onnx)')
     test_parser.add_argument('--data', type=str, required=True,
                              help='Path to data folder containing images and masks subfolders')
     test_parser.add_argument('--output', type=str, default='test_results')

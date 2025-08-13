@@ -141,3 +141,32 @@ def train(args):
             save_checkpoint(model, optimizer, epoch, best_iou, os.path.join(args.save_dir, 'best.pth'))
             print('Saved new best model.')
         save_checkpoint(model, optimizer, epoch, best_iou, os.path.join(args.save_dir, 'last.pth'))
+    
+    # Convert best.pth to ONNX format
+    try:
+        import subprocess
+        import sys
+        onnx_convert_cmd = [
+            sys.executable, 'convert_to_onnx.py',
+            '--weights', os.path.join(args.save_dir, 'best.pth'),
+            '--output', os.path.join(args.save_dir, 'best.onnx'),
+            '--img-size', str(args.img_size),
+            '--base-channels', str(args.base_channels),
+            '--backbone', args.backbone
+        ]
+        if use_boundary:
+            onnx_convert_cmd.append('--use-boundary')
+        print('Converting best.pth to ONNX format...')
+        subprocess.run(onnx_convert_cmd, check=True)
+        print('ONNX conversion completed successfully.')
+    except FileNotFoundError:
+        print('Failed to convert model to ONNX: convert_to_onnx.py script not found.')
+        print('Please ensure you have the convert_to_onnx.py script in the project directory.')
+    except subprocess.CalledProcessError as e:
+        print(f'Failed to convert model to ONNX: convert_to_onnx.py script failed with return code {e.returncode}.')
+        print('Please check if you have all the required dependencies installed, especially onnxruntime.')
+        print('You can install it with: pip install onnxruntime')
+    except Exception as e:
+        print(f'Failed to convert model to ONNX: {e}')
+        print('Please check if you have all the required dependencies installed, especially onnxruntime.')
+        print('You can install it with: pip install onnxruntime')

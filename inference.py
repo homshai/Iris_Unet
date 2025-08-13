@@ -6,14 +6,62 @@ from torch.utils.data import DataLoader
 from dataset import IrisDataset
 import time
 
+
+
 def run_inference(args):
     device = torch.device(args.device if torch.cuda.is_available() and 'cuda' in args.device else 'cpu')
-    model = build_model(num_classes=1, pretrained=False, base_channels=32)
-    ck = torch.load(args.weights, map_location=device)
-    state = ck.get('model', ck)
-    model.load_state_dict(state, strict=False)
-    model.to(device); model.eval()
-    print('Model params:', count_parameters(model))
+    
+    # Check if using ONNX model
+    use_onnx = args.weights.endswith('.onnx')
+    
+    if use_onnx:
+        import onnxruntime as ort
+        # Use ONNX Runtime with appropriate execution provider
+        if 'cuda' in args.device and torch.cuda.is_available():
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        else:
+            providers = ['CPUExecutionProvider']
+        
+        # Try to create InferenceSession with specified providers
+        try:
+            session = ort.InferenceSession(args.weights, providers=providers)
+        except Exception as e:
+            print(f"Warning: Failed to create session with {providers}. Error: {e}")
+            print("Falling back to CPU execution provider.")
+            session = ort.InferenceSession(args.weights, providers=['CPUExecutionProvider'])
+            
+        input_name = session.get_inputs()[0].name
+        # For ONNX models, we can't easily count parameters
+        print('Using ONNX model for inference')
+        # Define a mock model object for ONNX to pass to measure_inference_fps
+        class MockModel:
+            def __init__(self, session, input_name):
+                self.session = session
+                self.input_name = input_name
+            
+            def __call__(self, x):
+                # This mock model's __call__ method will run the ONNX inference
+                x_np = x.cpu().numpy()
+                preds = self.session.run(None, {self.input_name: x_np})[0]
+                return torch.from_numpy(preds)
+            
+            def to(self, device):
+                # Mock method to satisfy measure_inference_fps
+                return self
+            
+            def eval(self):
+                # Mock method to satisfy measure_inference_fps
+                return self
+        
+        model = MockModel(session, input_name)
+    else:
+        # Build PyTorch model
+        model = build_model(num_classes=1, pretrained=False, base_channels=32)
+        ck = torch.load(args.weights, map_location=device)
+        state = ck.get('model', ck)
+        model.load_state_dict(state, strict=False)
+        model.to(device); model.eval()
+        print('Model params:', count_parameters(model))
     
     inputs = []
     if os.path.isdir(args.input):
@@ -50,8 +98,17 @@ def run_inference(args):
     with torch.no_grad():
         for imgs, masks in loader:
             imgs = imgs.to(device)
-            preds = model(imgs)
-            probs = torch.sigmoid(preds).cpu().numpy()
+            
+            # Run inference
+            if use_onnx:
+                # ONNX inference is now handled by the mock model
+                preds = model(imgs)
+                probs = torch.sigmoid(preds).cpu().numpy()
+            else:
+                # PyTorch inference
+                preds = model(imgs)
+                probs = torch.sigmoid(preds).cpu().numpy()
+            
             for b in range(probs.shape[0]):
                 prob = probs[b,0]
                 mask = (prob > 0.5).astype('uint8')*255
