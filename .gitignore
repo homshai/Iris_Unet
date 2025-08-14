@@ -21,6 +21,7 @@ Thumbs.db
 
 # Checkpoints and results
 checkpoints/
+models/
 results/
 test_results/
 

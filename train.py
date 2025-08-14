@@ -6,6 +6,7 @@ from model import build_model
 from dataset import build_combined_dataset
 from utils import dice_loss, save_checkpoint, iou_score, dice_score, count_parameters, boundary_target
 from tqdm import tqdm
+from matplotlib import pyplot as plt
 
 def seed_everything(seed=42):
     random.seed(seed); import numpy as np; np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -75,6 +76,11 @@ def train(args):
     best_iou = 0.0
     os.makedirs(args.save_dir, exist_ok=True)
 
+    # Lists to store metrics for plotting
+    train_losses = []
+    val_ious = []
+    val_dices = []
+
     for epoch in range(args.epochs):
         model.train()
         epoch_loss = 0.0
@@ -135,6 +141,12 @@ def train(args):
 
         iou_avg = iou_m / max(1, n_val); dice_avg = dice_m / max(1, n_val)
         print(f'Epoch {epoch}: val IoU={iou_avg:.4f}, Dice={dice_avg:.4f}')
+        
+        # Store metrics for plotting
+        train_losses.append(epoch_loss / len(train_loader.dataset))
+        val_ious.append(iou_avg)
+        val_dices.append(dice_avg)
+        
         # save best
         if iou_avg > best_iou:
             best_iou = iou_avg
@@ -142,14 +154,38 @@ def train(args):
             print('Saved new best model.')
         save_checkpoint(model, optimizer, epoch, best_iou, os.path.join(args.save_dir, 'last.pth'))
     
+
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot metrics
+    epochs_range = range(args.epochs)
+    ax.plot(epochs_range, val_ious, label='IoU', marker='o', markersize=3)
+    ax.plot(epochs_range, val_dices, label='Dice', marker='s', markersize=3)
+    
+    # Set labels and title
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Score')
+    ax.set_title('Validation IoU and Dice Coefficients')
+    ax.legend()
+    ax.grid(True)
+    
+    # Save plot
+    plot_path = os.path.join(args.save_dir, 'metrics_plot.png')
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f'Metrics plot saved to {plot_path}')
+
+    
     # Convert best.pth to ONNX format
     try:
         import subprocess
         import sys
         onnx_convert_cmd = [
             sys.executable, 'convert_to_onnx.py',
-            '--weights', os.path.join(args.save_dir, 'best.pth'),
-            '--output', os.path.join(args.save_dir, 'best.onnx'),
+            '--pth-path', os.path.join(args.save_dir, 'best.pth'),
+            '--onnx-path', os.path.join(args.save_dir, 'best.onnx'),
             '--img-size', str(args.img_size),
             '--base-channels', str(args.base_channels),
             '--backbone', args.backbone
