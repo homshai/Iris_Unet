@@ -78,12 +78,19 @@ def train(args):
 
     # Lists to store metrics for plotting
     train_losses = []
+    train_bce_losses = []
+    train_dice_losses = []
+    train_boundary_losses = []
     val_ious = []
     val_dices = []
 
     for epoch in range(args.epochs):
         model.train()
         epoch_loss = 0.0
+        epoch_bce_loss = 0.0
+        epoch_dice_loss = 0.0
+        epoch_boundary_loss = 0.0
+        num_batches = 0
         pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{args.epochs}')
         for imgs, masks in pbar:
             imgs = imgs.to(device); masks = masks.to(device)
@@ -97,23 +104,58 @@ def train(args):
                     logits = outputs
                     boundary_logits = None
 
-                main_loss = combined_loss_logits(logits, masks, bce_fn, dice_weight=1.0)
+                # 分别计算各类loss
+                bce_loss = bce_fn(logits, masks)
+                preds_sig = torch.sigmoid(logits)
+                dice_loss_val = dice_loss(preds_sig, masks)
+                main_loss = bce_loss + dice_loss_val
                 loss = main_loss
+                
+                boundary_loss_val = 0.0
                 if use_boundary and boundary_logits is not None:
                     # compute edge ground truth from mask
                     edge_gt = boundary_target(masks)  # returns float 0/1
-                    bce_boundary = bce_fn(boundary_logits, edge_gt)
+                    boundary_loss_val = bce_fn(boundary_logits, edge_gt)
                     # You may also use dice on boundary if you want; here we use BCE for boundary
-                    loss = loss + float(args.boundary_weight) * bce_boundary
+                    loss = loss + float(args.boundary_weight) * boundary_loss_val
 
             scaler.scale(loss).backward()
             scaler.step(optimizer); scaler.update()
-            epoch_loss += loss.item() * imgs.size(0)
+            
+            # 累积各类loss
+            batch_size = imgs.size(0)
+            epoch_loss += loss.item() * batch_size
+            epoch_bce_loss += bce_loss.item() * batch_size
+            epoch_dice_loss += dice_loss_val.item() * batch_size
+            if use_boundary and boundary_logits is not None:
+                epoch_boundary_loss += boundary_loss_val.item() * batch_size
+            num_batches += 1
+            
+            # 打印各类loss信息
+            if pbar.n % 50 == 0:  # 每50个batch打印一次详细loss信息
+                print(f"\nBatch {pbar.n}: BCE Loss: {bce_loss.item():.4f}, Dice Loss: {dice_loss_val.item():.4f}", end="")
+                if use_boundary and boundary_logits is not None:
+                    print(f", Boundary Loss: {boundary_loss_val.item():.4f}", end="")
+                print(f", Total Loss: {loss.item():.4f}")
+            
             # update progress with averaged loss
             seen = (pbar.n + 1) * train_loader.batch_size
             avg_loss = epoch_loss / max(1, seen)
             pbar.set_postfix(loss=f'{avg_loss:.4f}')
         scheduler.step()
+        
+        # 打印epoch平均loss信息
+        dataset_size = len(train_loader.dataset)
+        avg_total_loss = epoch_loss / dataset_size
+        avg_bce_loss = epoch_bce_loss / dataset_size
+        avg_dice_loss = epoch_dice_loss / dataset_size
+        print(f"\nEpoch {epoch} Training Loss Summary:")
+        print(f"  BCE Loss: {avg_bce_loss:.4f}")
+        print(f"  Dice Loss: {avg_dice_loss:.4f}")
+        if use_boundary:
+            avg_boundary_loss = epoch_boundary_loss / dataset_size
+            print(f"  Boundary Loss: {avg_boundary_loss:.4f}")
+        print(f"  Total Loss: {avg_total_loss:.4f}")
 
         # unfreeze if needed
         if epoch+1 == args.freeze_backbone_epochs:
@@ -143,58 +185,115 @@ def train(args):
         print(f'Epoch {epoch}: val IoU={iou_avg:.4f}, Dice={dice_avg:.4f}')
         
         # Store metrics for plotting
-        train_losses.append(epoch_loss / len(train_loader.dataset))
+        dataset_size = len(train_loader.dataset)
+        train_losses.append(epoch_loss / dataset_size)
+        train_bce_losses.append(epoch_bce_loss / dataset_size)
+        train_dice_losses.append(epoch_dice_loss / dataset_size)
+        if use_boundary:
+            train_boundary_losses.append(epoch_boundary_loss / dataset_size)
         val_ious.append(iou_avg)
         val_dices.append(dice_avg)
+        
+        # Generate model filename with key parameters
+        boundary_str = f"_boundary{args.boundary_weight}" if use_boundary else ""
+        model_name = f"{args.backbone}_img{args.img_size}_bs{args.batch_size}_ch{args.base_channels}{boundary_str}"
         
         # save best
         if iou_avg > best_iou:
             best_iou = iou_avg
-            save_checkpoint(model, optimizer, epoch, best_iou, os.path.join(args.save_dir, 'best.pth'))
-            print('Saved new best model.')
-        save_checkpoint(model, optimizer, epoch, best_iou, os.path.join(args.save_dir, 'last.pth'))
+            best_filename = f'best_{model_name}.pth'
+            save_checkpoint(model, optimizer, epoch, best_iou, os.path.join(args.save_dir, best_filename))
+            print(f'Saved new best model: {best_filename}')
+        
+        last_filename = f'last_{model_name}.pth'
+        save_checkpoint(model, optimizer, epoch, best_iou, os.path.join(args.save_dir, last_filename))
     
 
-    # Create figure and axis
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # Create subplots for metrics and losses
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
     
-    # Plot metrics
     epochs_range = range(args.epochs)
-    ax.plot(epochs_range, val_ious, label='IoU', marker='o', markersize=3)
-    ax.plot(epochs_range, val_dices, label='Dice', marker='s', markersize=3)
     
-    # Set labels and title
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Score')
-    ax.set_title('Validation IoU and Dice Coefficients')
-    ax.legend()
-    ax.grid(True)
+    # Plot validation metrics
+    ax1.plot(epochs_range, val_ious, label='IoU', marker='o', markersize=3, color='blue')
+    ax1.plot(epochs_range, val_dices, label='Dice', marker='s', markersize=3, color='green')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Score')
+    ax1.set_title('Validation IoU and Dice Coefficients')
+    ax1.legend()
+    ax1.grid(True)
     
-    # Save plot
-    plot_path = os.path.join(args.save_dir, 'metrics_plot.png')
+    # Plot total training loss
+    ax2.plot(epochs_range, train_losses, label='Total Loss', marker='o', markersize=3, color='red')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Loss')
+    ax2.set_title('Training Total Loss')
+    ax2.legend()
+    ax2.grid(True)
+    
+    # Plot BCE and Dice losses
+    ax3.plot(epochs_range, train_bce_losses, label='BCE Loss', marker='o', markersize=3, color='orange')
+    ax3.plot(epochs_range, train_dice_losses, label='Dice Loss', marker='s', markersize=3, color='purple')
+    ax3.set_xlabel('Epoch')
+    ax3.set_ylabel('Loss')
+    ax3.set_title('Training BCE and Dice Losses')
+    ax3.legend()
+    ax3.grid(True)
+    
+    # Plot boundary loss if used
+    if use_boundary and train_boundary_losses:
+        ax4.plot(epochs_range, train_boundary_losses, label='Boundary Loss', marker='o', markersize=3, color='brown')
+        ax4.set_xlabel('Epoch')
+        ax4.set_ylabel('Loss')
+        ax4.set_title('Training Boundary Loss')
+        ax4.legend()
+        ax4.grid(True)
+    else:
+        # If no boundary loss, plot all losses together for comparison
+        ax4.plot(epochs_range, train_losses, label='Total Loss', marker='o', markersize=3, color='red')
+        ax4.plot(epochs_range, train_bce_losses, label='BCE Loss', marker='s', markersize=3, color='orange')
+        ax4.plot(epochs_range, train_dice_losses, label='Dice Loss', marker='^', markersize=3, color='purple')
+        ax4.set_xlabel('Epoch')
+        ax4.set_ylabel('Loss')
+        ax4.set_title('All Training Losses Comparison')
+        ax4.legend()
+        ax4.grid(True)
+    
+    # Save plot with parameter info in filename
+    boundary_str = f"_boundary{args.boundary_weight}" if use_boundary else ""
+    model_name = f"{args.backbone}_img{args.img_size}_bs{args.batch_size}_ch{args.base_channels}{boundary_str}"
+    plot_filename = f'training_metrics_and_losses_{model_name}.png'
+    plot_path = os.path.join(args.save_dir, plot_filename)
     plt.tight_layout()
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f'Metrics plot saved to {plot_path}')
+    print(f'Training metrics and losses plot saved to {plot_path}')
 
     
     # Convert best.pth to ONNX format
     try:
         import subprocess
         import sys
+        
+        # Generate consistent filenames with parameters
+        boundary_str = f"_boundary{args.boundary_weight}" if use_boundary else ""
+        model_name = f"{args.backbone}_img{args.img_size}_bs{args.batch_size}_ch{args.base_channels}{boundary_str}"
+        best_pth_name = f'best_{model_name}.pth'
+        best_onnx_name = f'best_{model_name}.onnx'
+        
         onnx_convert_cmd = [
             sys.executable, 'convert_to_onnx.py',
-            '--pth-path', os.path.join(args.save_dir, 'best.pth'),
-            '--onnx-path', os.path.join(args.save_dir, 'best.onnx'),
+            '--pth-path', os.path.join(args.save_dir, best_pth_name),
+            '--onnx-path', os.path.join(args.save_dir, best_onnx_name),
             '--img-size', str(args.img_size),
             '--base-channels', str(args.base_channels),
             '--backbone', args.backbone
         ]
         if use_boundary:
             onnx_convert_cmd.append('--use-boundary')
-        print('Converting best.pth to ONNX format...')
+        print(f'Converting {best_pth_name} to ONNX format...')
         subprocess.run(onnx_convert_cmd, check=True)
-        print('ONNX conversion completed successfully.')
+        print(f'ONNX conversion completed successfully: {best_onnx_name}')
     except FileNotFoundError:
         print('Failed to convert model to ONNX: convert_to_onnx.py script not found.')
         print('Please ensure you have the convert_to_onnx.py script in the project directory.')
